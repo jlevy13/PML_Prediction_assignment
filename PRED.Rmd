@@ -1,0 +1,137 @@
+Practical Machine Learning - Prediction Assignment Writeup
+==========================================================
+### Joseph Levy, jlevy13@gmail.com
+
+#### Data input and management
+Reading traing data and test cases. Blank values are regarded as missing (NA values).
+```{r readdata, cache=TRUE}
+# setwd("~/Courses/Practical Machine Learning/Prediction Assignment")
+datain<-read.csv("pml-training.csv",na.strings=c("NA",""))
+testcases<-read.csv("pml-testing.csv",na.strings=c("NA",""))
+```
+
+Initial data cleaning (applied to both training data and test cases): 
+
+1. Remove variables (features) in which some of the observations have NA values 
+
+2. Remove non informative variables, such as name and time stamp. Also removing variables that look like repeated measures (variable name ends with "_x", "_y", or "_z"), as the information is captured in the summary statistics variables (variables that start with "avg", "min", "max", etc.) 
+
+```{r managedata, cache=TRUE}
+# remove NA variables
+mycount<-function(v){
+    count<-sum(!is.na(v))
+    count
+}
+counts=apply(datain,2,mycount)
+include=(counts==nrow(datain))
+datause=datain[,include]
+testcases <- testcases[,include]
+
+#remove name, timestamp, repeated measures, etc.
+removeIndex <- grep("timestamp|X|user_name|new_window|_x|_y|_z",names(datause))
+datause <- datause[,-removeIndex]
+testcases <- testcases[,-removeIndex]
+rm(removeIndex)
+
+rm(mycount)
+rm(counts)
+rm(include)
+```
+Following the above data cleaning step, the data now contains 17 potential predictive variables.
+
+#### Explore correlation among remaning variables
+Calculationg the correlation coefficients between 17 potential predictive variables, and scan for correlations with absolute values greater than 0.7. The rationale for choosing 0.7 is that r=0.7 indicates that bout 50% (0.7^2) of the variation in one of the variables is explained by the other variable.
+
+```{r corr, cache=TRUE}
+#correlations
+M <- abs(cor(datause[,-18]))
+diag(M) <- 0
+which(M > 0.7,arr.ind=T)
+M[2:5,2:5]
+#PCA
+```
+The correlation analysis indicates that the 4 belt variables (variables no. 2-5) are highly correlated with each other.
+
+#### Creation of training and test datasets 
+As the size of the dataset is too large for my laptop to handle, I sample ~3000 cases/observations from the data to use as training data, and additional ~1000 observations as test data (that should not be confused with the 20 test cases). 
+
+```{r sample, cache=TRUE}
+library(caret)
+# sample ~3000 obs for training and ~1000 for testing
+set.seed(8695)
+inTrain <- createDataPartition(y=datause$classe, p=0.15, list=FALSE)
+training <- datause[inTrain,]
+remaining<- datause[-inTrain,]
+inTest <- createDataPartition(y=remaining$classe, p=0.06, list=FALSE)
+testing <- remaining[inTest,]
+rm(datause)
+rm(remaining)
+rm(inTest)
+rm(inTrain)
+nrow(training)
+nrow(testing)
+```
+#### Pre-processing
+Running PCA on the 4 belt variables show that ~90% of the variation can be explained by the first principal component. Therefore, those variables are removed from the traing data and replaced by the first PC. The same transformation is applied to the testing data and the test cases. 
+```{r preproc, cache=TRUE}
+#Principal components analysis
+beltPCA<-prcomp(training[,2:5])
+summary(beltPCA)
+
+# 1st comp explains 90% of variation, Save its rotation coefficients
+PC1<-beltPCA$rotation[,1]
+
+# replace belt variables by 1st principal componenet
+training$beltPC <-beltPCA$x[,1]
+testing$beltPC<-testing$roll_belt*PC1[1]+testing$pitch_belt*PC1[2]+
+                testing$yaw_belt*PC1[3]+testing$total_accel_belt*PC1[4]
+testcases$beltPC<-testcases$roll_belt*PC1[1]+testcases$pitch_belt*PC1[2]+
+    testcases$yaw_belt*PC1[3]+testcases$total_accel_belt*PC1[4]
+
+removeBelt <- 2:5
+training <- training[,-removeBelt]
+testing <- testing[,-removeBelt]
+testcases <- testcases[-removeBelt]
+rm(beltPCA)
+rm(PC1)
+rm(removeBelt)
+```
+
+#### Application of prediction models
+I tried two possible prediction models: CART and Random Forest. Below are summary statistics for both:
+
+```{r cart, cache=TRUE}
+#use all variables in CART
+cart <- train(classe~., data=training,  method="rpart")
+cart
+```
+
+
+```{r RF, cache=TRUE}
+# use all variables in random forest
+library(randomForest)
+RF <- train(classe~., data=training,  method="rf", prox=TRUE)
+RF
+```
+
+#### Cross validation
+As the RF performs much better than CART (~90% accuracy vs. ~50%), it is the model of choice. The following R code performs 10-fold cross validation of the training data (each time, predicting ~290 left out observations based on the remaining observations):
+
+```{r RVCV, cache=TRUE}
+# create 10 folds for CV
+folds <- createFolds(y=training$classe, k=10, list=TRUE, returnTrain=FALSE)
+
+# loop RF cross validation
+RFtest<-NULL
+for(j in 1:10){
+    newtrain <-training[-folds[[j]],]
+    newtest <- training[folds[[j]],]
+    newRF <- train(classe~., data=newtrain,  method="rf", prox=TRUE)
+    newtest$pred<-predict(newRF, newtest)
+    RFtest<-rbind(RFtest,newtest)
+}
+
+RFconf<-confusionMatrix(RFtest$classe, RFtest$pred)
+RFconf
+```
+The above cross validation analysis yielded accuracy of 0.983, therefore the estimated out of sample error is 2.2% (1-0.978). A 95% confidence interval for the accuracy is 1.7% - 2.8%, and the upper confidence limit of 2.8% is somewhat less optimistic esti,ate for the out of sample error, but it is still acceptable error rate.
